@@ -56,6 +56,7 @@ void transcoder_init(write_str_fn w, send_byte_fn s) {
 void transcoder_accept_inbound_byte(uint8_t b, uint8_t status) {
   static uint8_t checksum = 0;
   static uint8_t state = S_HEADER;
+  static uint8_t rssi;
   static uint8_t multi_bytes = 0;
   static union {
     uint16_t word16;
@@ -63,8 +64,21 @@ void transcoder_accept_inbound_byte(uint8_t b, uint8_t status) {
   } minibuf;
   static uint8_t header;
   static uint8_t flags;
+  static uint32_t addrs[3];
   static char str[12];
 
+  if( status==TC_RX_RSSI )
+  {
+    // RSSI calculation from DN505 application note; negated to match as closely
+    // as possible to the HGI80 output
+    if (b >= 128) {
+        rssi = -(((int16_t)(b - 256) / 2) - 74);
+    } else {
+        rssi = -((b / 2) - 74);
+    }
+    return;
+  }
+  
   if (status != 0) {
     if (state != S_COMPLETE || status != ERR_NONE) {
       switch (status) {
@@ -113,11 +127,15 @@ void transcoder_accept_inbound_byte(uint8_t b, uint8_t status) {
     multi_bytes = 0;
     minibuf.word32 = 0;
 
-    if (is_information(flags)) { write_str("---  I --- "); return; }
-    if (is_request(flags))     { write_str("--- RQ --- "); return; }
-    if (is_response(flags))    { write_str("--- RP --- "); return; }
-    if (is_write(flags))       { write_str("---  W --- "); return; }
+    sprintf( str,"%03d ",rssi );
 
+    write_str(str);
+    
+    if (is_information(flags)) { write_str(" I "); return; }
+    if (is_request(flags))     { write_str("RQ "); return; }
+    if (is_response(flags))    { write_str("RP "); return; }
+    if (is_write(flags))       { write_str(" W "); return; }
+        
     write_str("\x09*HDR*");
     state = S_ERROR;
     return;
@@ -132,16 +150,13 @@ void transcoder_accept_inbound_byte(uint8_t b, uint8_t status) {
 
       multi_bytes++;
       if (multi_bytes == 3) {
-        sprintf(str, "%02hu:%06lu ", (uint8_t)(minibuf.word32 >> 18) & 0x3F, minibuf.word32 & 0x3FFFF);
-        write_str(str);
-
+        addrs[0] = minibuf.word32;
         state = S_ADDR1;
         multi_bytes = 0;
         minibuf.word32 = 0;
       }
       return;
     } else {
-      write_str("--:------ ");
       state = S_ADDR1;  // and fall through
     }
   }
@@ -153,16 +168,13 @@ void transcoder_accept_inbound_byte(uint8_t b, uint8_t status) {
 
       multi_bytes++;
       if (multi_bytes == 3) {
-        sprintf(str, "%02hu:%06lu ", (uint8_t)(minibuf.word32 >> 18) & 0x3F, minibuf.word32 & 0x3FFFF);
-        write_str(str);
-
+        addrs[1] = minibuf.word32;
         state = S_ADDR2;
         multi_bytes = 0;
         minibuf.word32 = 0;
       }
       return;
     } else {
-      write_str("--:------ ");
       state = S_ADDR2;  // and fall through
     }
   }
@@ -174,31 +186,52 @@ void transcoder_accept_inbound_byte(uint8_t b, uint8_t status) {
 
       multi_bytes++;
       if (multi_bytes == 3) {
-        sprintf(str, "%02hu:%06lu ", (uint8_t)(minibuf.word32 >> 18) & 0x3F, minibuf.word32 & 0x3FFFF);
-        write_str(str);
-
+        addrs[2] = minibuf.word32;     
         state = S_PARAM0;
         multi_bytes = 0;
         minibuf.word32 = 0;
       }
       return;
     } else {
-      write_str("--:------ ");
       state = S_PARAM0;  // and fall through
     }
   }
 
   if (state == S_PARAM0) {
     if (has_param0(header)) {
-      // we don't use params; ditch it and move on
+      sprintf(str, "%03hu ", b);
+      write_str(str);      
       state = S_PARAM1;
       return;
     } else {
+      write_str("--- ");
       state = S_PARAM1;  // and fall through
     }
   }
 
   if (state == S_PARAM1) {
+    // having printed param0, we can now print addresses
+    if (has_addr0(flags)) {
+      sprintf(str, "%02hu:%06lu ", (uint8_t)(addrs[0] >> 18) & 0x3F, addrs[0] & 0x3FFFF);
+      write_str(str);
+    } else {
+      write_str("--:------ ");
+    }
+
+    if (has_addr1(flags)) {
+      sprintf(str, "%02hu:%06lu ", (uint8_t)(addrs[1] >> 18) & 0x3F, addrs[1] & 0x3FFFF);
+      write_str(str);
+    } else {
+      write_str("--:------ ");
+    }
+
+    if (has_addr2(flags)) {
+      sprintf(str, "%02hu:%06lu ", (uint8_t)(addrs[2] >> 18) & 0x3F, addrs[2] & 0x3FFFF);
+      write_str(str);
+    } else {
+      write_str("--:------ ");
+    }
+    
     if (has_param1(header)) {
       // we don't use params; ditch it and move on
       state = S_CMD;
